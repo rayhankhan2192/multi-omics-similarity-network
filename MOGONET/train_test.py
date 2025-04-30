@@ -49,7 +49,6 @@ def prepare_trte_data(data_folder, view_list):
 def gen_trte_adj_mat(data_tr_list, data_trte_list, trte_idx, adj_parameter):
     #adj_metric = "cosine" # cosine distance
     #adj_metric = "rbf"
-    #adj_metric = "adaptive_rbf"
     adj_metric = "hybrid"
     adj_train_list = []
     adj_test_list = []
