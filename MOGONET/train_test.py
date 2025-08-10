@@ -49,7 +49,7 @@ def prepare_trte_data(data_folder, view_list):
 def gen_trte_adj_mat(data_tr_list, data_trte_list, trte_idx, adj_parameter):
     #adj_metric = "cosine" # cosine distance
     #adj_metric = "rbf"
-    adj_metric = "hybrid"
+    adj_metric = "cosine"
     adj_train_list = []
     adj_test_list = []
     
@@ -59,9 +59,9 @@ def gen_trte_adj_mat(data_tr_list, data_trte_list, trte_idx, adj_parameter):
         os.makedirs(adj_dir)
     
     for i in range(len(data_tr_list)):
-        adj_parameter_adaptive = cal_adj_mat_parameter(adj_parameter, data_tr_list[i], adj_metric)
-        adj_train = gen_adj_mat_tensor(data_tr_list[i], adj_parameter_adaptive, adj_metric)
-        adj_test = gen_test_adj_mat_tensor(data_trte_list[i], trte_idx, adj_parameter_adaptive, adj_metric)
+        adj_parameter_adaptive = cal_adj_mat_parameter(adj_parameter, data_tr_list[i])
+        adj_train = gen_adj_mat_tensor(data_tr_list[i], adj_parameter_adaptive)
+        adj_test = gen_test_adj_mat_tensor(data_trte_list[i], trte_idx, adj_parameter_adaptive)
         
         # Convert to numpy arrays
         adj_train_np = adj_train.cpu().numpy()
@@ -141,7 +141,7 @@ def test_epoch(data_list, adj_list, te_idx, model_dict):
 def train_test(data_folder, view_list, num_class,
                lr_e_pretrain, lr_e, lr_c, 
                num_epoch_pretrain, num_epoch):
-    test_inverval = 20
+    test_inverval = 50
     num_view = len(view_list)
     dim_hvcdn = pow(num_class,num_view)
     if data_folder == 'ROSMAP':
