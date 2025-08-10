@@ -108,3 +108,86 @@ def init_optim(num_view, model_dict, lr_e=1e-4, lr_c=1e-4):
     if num_view >= 2:
         optim_dict["C"] = torch.optim.Adam(model_dict["C"].parameters(), lr=lr_c)
     return optim_dict
+
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+# from torch_geometric.nn import GATConv
+# from torch_geometric.utils import dense_to_sparse
+
+# def xavier_init(m):
+#     if isinstance(m, nn.Linear):
+#         nn.init.xavier_normal_(m.weight)
+#         if m.bias is not None:
+#             m.bias.data.fill_(0.0)
+
+# class GAT_E(nn.Module):
+#     def __init__(self, in_dim, hgcn_dim, dropout=0.5):
+#         super().__init__()
+#         self.gat1 = GATConv(in_dim, hgcn_dim[0], heads=1)
+#         self.gat2 = GATConv(hgcn_dim[0], hgcn_dim[1], heads=1)
+#         self.gat3 = GATConv(hgcn_dim[1], hgcn_dim[2], heads=1)
+#         self.dropout = dropout
+
+#     def forward(self, x, adj):
+#         # Convert dense adjacency matrix to edge_index format for PyG
+#         edge_index, _ = dense_to_sparse(adj)
+
+#         x = F.dropout(F.leaky_relu(self.gat1(x, edge_index), 0.25), self.dropout, training=self.training)
+#         x = F.dropout(F.leaky_relu(self.gat2(x, edge_index), 0.25), self.dropout, training=self.training)
+#         x = F.leaky_relu(self.gat3(x, edge_index), 0.25)
+#         return x
+
+
+# class Classifier_1(nn.Module):
+#     def __init__(self, in_dim, out_dim):
+#         super().__init__()
+#         self.clf = nn.Sequential(nn.Linear(in_dim, out_dim))
+#         self.clf.apply(xavier_init)
+
+#     def forward(self, x):
+#         return self.clf(x)
+
+
+# class VCDN(nn.Module):
+#     def __init__(self, num_view, num_cls, hvcdn_dim):
+#         super().__init__()
+#         self.num_cls = num_cls
+#         self.model = nn.Sequential(
+#             nn.Linear(pow(num_cls, num_view), hvcdn_dim),
+#             nn.LeakyReLU(0.25),
+#             nn.Linear(hvcdn_dim, num_cls)
+#         )
+#         self.model.apply(xavier_init)
+
+#     def forward(self, in_list):
+#         num_view = len(in_list)
+#         for i in range(num_view):
+#             in_list[i] = torch.sigmoid(in_list[i])
+#         x = torch.reshape(torch.matmul(in_list[0].unsqueeze(-1), in_list[1].unsqueeze(1)), (-1, pow(self.num_cls, 2), 1))
+#         for i in range(2, num_view):
+#             x = torch.reshape(torch.matmul(x, in_list[i].unsqueeze(1)), (-1, pow(self.num_cls, i + 1), 1))
+#         vcdn_feat = torch.reshape(x, (-1, pow(self.num_cls, num_view)))
+#         output = self.model(vcdn_feat)
+#         return output
+
+
+# def init_model_dict(num_view, num_class, dim_list, dim_he_list, dim_hc, gcn_dropout=0.5):
+#     model_dict = {}
+#     for i in range(num_view):
+#         model_dict[f"E{i + 1}"] = GAT_E(dim_list[i], dim_he_list, gcn_dropout)
+#         model_dict[f"C{i + 1}"] = Classifier_1(dim_he_list[-1], num_class)
+#     if num_view >= 2:
+#         model_dict["C"] = VCDN(num_view, num_class, dim_hc)
+#     return model_dict
+
+
+# def init_optim(num_view, model_dict, lr_e=1e-4, lr_c=1e-4):
+#     optim_dict = {}
+#     for i in range(num_view):
+#         optim_dict[f"C{i + 1}"] = torch.optim.Adam(
+#             list(model_dict[f"E{i + 1}"].parameters()) + list(model_dict[f"C{i + 1}"].parameters()),
+#             lr=lr_e)
+#     if num_view >= 2:
+#         optim_dict["C"] = torch.optim.Adam(model_dict["C"].parameters(), lr=lr_c)
+#     return optim_dict
