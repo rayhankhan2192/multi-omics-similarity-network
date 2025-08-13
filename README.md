@@ -1,1 +1,1 @@
-# multi-omics-MOGONET, research
+# multi-omics-similarity-network, research
