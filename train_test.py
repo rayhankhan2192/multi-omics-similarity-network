@@ -1,199 +1,397 @@
+""" Training and testing of the model
+"""
 import os
 import numpy as np
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 import torch
 import torch.nn.functional as F
-import pandas as pd
+from models import init_model_dict, init_optim
+from utils import one_hot_tensor, cal_sample_weight, gen_adj_mat_tensor, gen_test_adj_mat_tensor, cal_adj_mat_parameter
 
 cuda = True if torch.cuda.is_available() else False
 
-# def normalize_data(data):
-#     mean = torch.mean(data, dim=0, keepdim=True)
-#     std = torch.std(data, dim=0, keepdim=True)
-#     return (data - mean) / (std + 1e-8)
-def normalize_data(data):
-    mean = torch.mean(data, dim=0, keepdim=True)
-    std = torch.std(data, dim=0, keepdim=True)
-    std = torch.clamp(std, min=1e-8)
-    return (data - mean) / std
 
-def cal_sample_weight(labels, num_class, use_sample_weight=True):
-    if not use_sample_weight:
-        return np.ones(len(labels)) / len(labels)
-    count = np.zeros(num_class)
-    for i in range(num_class):
-        count[i] = np.sum(labels==i)
-    sample_weight = np.zeros(labels.shape)
-    for i in range(num_class):
-        sample_weight[np.where(labels==i)[0]] = count[i]/np.sum(count)
-    return sample_weight
-
-
-def one_hot_tensor(y, num_dim):
-    y_onehot = torch.zeros(y.shape[0], num_dim)
-    y_onehot.scatter_(1, y.view(-1,1), 1)
-    return y_onehot
-
-
-def to_sparse(x):
-    x_typename = torch.typename(x).split('.')[-1]
-    sparse_tensortype = getattr(torch.sparse, x_typename)
-    indices = torch.nonzero(x)
-    if len(indices.shape) == 0:  # if all elements are zeros
-        return sparse_tensortype(*x.shape)
-    indices = indices.t()
-    values = x[tuple(indices[i] for i in range(indices.shape[0]))]
-    return sparse_tensortype(indices, values, x.size())
-
-def cosine_distance_torch(x1, x2=None, eps=1e-8):
-    x2 = x1 if x2 is None else x2
-    w1 = x1.norm(p=2, dim=1, keepdim=True)
-    w2 = w1 if x2 is x1 else x2.norm(p=2, dim=1, keepdim=True)
-    cosine_similarity = torch.mm(x1, x2.t()) / (w1 * w2.t()).clamp(min=eps)
-    cosine_distance = 1 - cosine_similarity
-    return cosine_similarity
-
-def rbf_distance_torch(x1, x2=None, gamma=None):
-    print("From rbf_similarity_torch")
-    x2 = x1 if x2 is None else x2
-    x1_norm = (x1 ** 2).sum(dim=1).view(-1, 1)
-    x2_norm = x1_norm if x2 is x1 else (x2 ** 2).sum(dim=1).view(1, -1)
-    dist_squared = x1_norm + x2_norm - 2.0 * torch.mm(x1, x2.T)
-    dist_squared = torch.clamp(dist_squared, min=0.0)  # Numerical stability
-    if gamma is None:
-        median_dist = torch.median(dist_squared[dist_squared > 0])
-        gamma = 1.0 / (2.0 * median_dist)
-    sim = torch.exp(-gamma * dist_squared)
-    rbf_dist = 1.0 - sim
-    print(f"RBF distance values (first 5x5):\n{rbf_dist[:5, :5]}")
-    return sim
-
-
-def hybrid_similarity_torch(x1, x2=None, alpha=0.5, gamma=0.01):
-    print("Hybrid similarity calculation started.")
-    x2 = x1 if x2 is None else x2
-    # Cosine distance → similarity
-    cosine_sim = cosine_distance_torch(x1, x2)
-    #cosine_sim = 1 - cosine_dist  # Convert to similarity
-    cosine_sim = torch.clamp(cosine_sim, 0, 1)
-    print(f"Cosine distance values (first 5x5):\n{cosine_sim[:5, :5]}")
-
-    rbf_sim = rbf_distance_torch(x1, x2, gamma=gamma)
-    rbf_sim = torch.clamp(rbf_sim, 0, 1)
-    print(f"RBF distance values (first 5x5):\n{rbf_sim[:5, :5]}")
-    alpha = 0.5
-    print("Alpha:", alpha)
-    hybrid_sim = alpha * cosine_sim + (1 - alpha) * rbf_sim
-    # Normalize rows to sum to 1
-    hybrid_sim = torch.clamp(hybrid_sim, 0, 1)
-    print(hybrid_sim[:5, :5])
-    return hybrid_sim
-
-def cal_adj_mat_parameter(edge_per_node, data, metric="hybrid"):
-    assert metric in ["rbf", "cosine", "hybrid"], "Only rbf, cosine, adaptive_rbf, and hybrid supported"
-    if metric == "rbf":
-        dist = rbf_distance_torch(data, data, gamma=0.01)
-    elif metric == "cosine":
-        dist = cosine_distance_torch(data, data)
-    elif metric == "hybrid":
-        dist = hybrid_similarity_torch(data, data, alpha=0.5, gamma=0.01)
-    parameter = torch.sort(dist.reshape(-1,)).values[edge_per_node*data.shape[0]]
-    return np.isscalar(parameter.data.cpu().numpy())
-    #return parameter.item()  # Return the scalar value
-
-def graph_from_dist_tensor(dist, parameter, self_dist=True):
-    if self_dist:
-        assert dist.shape[0]==dist.shape[1], "Input is not pairwise dist matrix"
-    g = (dist <= parameter).float()
-    if self_dist:
-        diag_idx = np.diag_indices(g.shape[0])
-        g[diag_idx[0], diag_idx[1]] = 0
-    return g
-
-def graph_from_topk_tensor(similarity, k):
-    topk_values, topk_indices = torch.topk(similarity, k=k, dim=-1)
-    mask = torch.zeros_like(similarity)
-    mask.scatter_(1, topk_indices, 1)
-    return mask
-
-
-def gen_adj_mat_tensor(data, parameter, metric="hybrid"):
-    assert metric in ["rbf", "cosine","hybrid"], "Only rbf, cosine, adaptive_rbf, and hybrid supported"
-    # Normalize data before computing similarity
-    #data = normalize_data(data)
-    if metric == "rbf":
-        dist = rbf_distance_torch(data, data, gamma=0.01)
-    elif metric == "cosine":
-        dist = cosine_distance_torch(data, data)
-    elif metric == "hybrid":
-        dist = hybrid_similarity_torch(data, data, alpha=0.5, gamma=0.01)
-    g = graph_from_dist_tensor(dist, parameter, self_dist=True)
-    if metric in ["rbf", "cosine", "adaptive_rbf", "hybrid"]:
-        #adj = 1 - dist
-        adj = dist
-    else:
-        adj = 1-dist
-    adj = adj*g 
-    adj_T = adj.transpose(0,1)
-    I = torch.eye(adj.shape[0])
-    if cuda:
-        I = I.cuda()
-    adj = adj + adj_T*(adj_T > adj).float() - adj*(adj_T > adj).float()
-    adj = F.normalize(adj + I, p=1)
-    # Convert to dense tensor before returning
-    adj = adj.to_dense()
-    return adj
-
-def gen_test_adj_mat_tensor(data, trte_idx, parameter, metric="hybrid"):
-    assert metric in ["rbf", "cosine", "hybrid"], "Only rbf, cosine, adaptive_rbf, and hybrid supported"
-    # Normalize data before computing similarity
-    #data = normalize_data(data)
-    adj = torch.zeros((data.shape[0], data.shape[0]))
-    if cuda:
-        adj = adj.cuda()
-    num_tr = len(trte_idx["tr"])
-    if metric == "rbf":
-        dist_tr2te = rbf_distance_torch(data[trte_idx["tr"]], data[trte_idx["te"]], gamma=0.01)
-    elif metric == "cosine":
-        dist_tr2te = cosine_distance_torch(data[trte_idx["tr"]], data[trte_idx["te"]])
-    elif metric == "hybrid":
-        dist_tr2te = hybrid_similarity_torch(data[trte_idx["tr"]], data[trte_idx["te"]], alpha=0.5)
-    g_tr2te = graph_from_dist_tensor(dist_tr2te, parameter, self_dist=False)
-    adj[:num_tr,num_tr:] = dist_tr2te
-    adj[:num_tr,num_tr:] = adj[:num_tr,num_tr:]*g_tr2te
-    if metric == "rbf":
-        dist_te2tr = rbf_distance_torch(data[trte_idx["te"]], data[trte_idx["tr"]], gamma=0.01)
-    elif metric == "cosine":
-        dist_te2tr = cosine_distance_torch(data[trte_idx["te"]], data[trte_idx["tr"]])
-    elif metric == "hybrid":
-        dist_te2tr = hybrid_similarity_torch(data[trte_idx["te"]], data[trte_idx["tr"]], alpha=0.5)
-
-    g_te2tr = graph_from_dist_tensor(dist_te2tr, parameter, self_dist=False)
-    # adj[num_tr:,:num_tr] = 1-dist_te2tr
-    adj[num_tr:,:num_tr] = dist_te2tr
-    adj[num_tr:,:num_tr] = adj[num_tr:,:num_tr]*g_te2tr
-    adj_T = adj.transpose(0,1)
-    I = torch.eye(adj.shape[0])
-    if cuda:
-        I = I.cuda()
-    adj = adj + adj_T*(adj_T > adj).float() - adj*(adj_T > adj).float()
-    adj = F.normalize(adj + I, p=1)
-    # Convert to dense tensor before returning
-    adj = adj.to_dense()
-    return adj
-
-def save_model_dict(folder, model_dict):
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-    for module in model_dict:
-        torch.save(model_dict[module].state_dict(), os.path.join(folder, module+".pth"))
-            
-def load_model_dict(folder, model_dict):
-    for module in model_dict:
-        if os.path.exists(os.path.join(folder, module+".pth")):
-#            print("Module {:} loaded!".format(module))
-            model_dict[module].load_state_dict(torch.load(os.path.join(folder, module+".pth"), map_location="cuda:{:}".format(torch.cuda.current_device())))
-        else:
-            print("WARNING: Module {:} from model_dict is not loaded!".format(module))
+def prepare_trte_data(data_folder, view_list):
+    num_view = len(view_list)
+    labels_tr = np.loadtxt(os.path.join(data_folder, "labels_tr.csv"), delimiter=',')
+    labels_te = np.loadtxt(os.path.join(data_folder, "labels_te.csv"), delimiter=',')
+    labels_tr = labels_tr.astype(int)
+    labels_te = labels_te.astype(int)
+    data_tr_list = []
+    data_te_list = []
+    for i in view_list:
+        data_tr_list.append(np.loadtxt(os.path.join(data_folder, str(i)+"_tr.csv"), delimiter=','))
+        data_te_list.append(np.loadtxt(os.path.join(data_folder, str(i)+"_te.csv"), delimiter=','))
+    num_tr = data_tr_list[0].shape[0]
+    num_te = data_te_list[0].shape[0]
+    data_mat_list = []
+    for i in range(num_view):
+        data_mat_list.append(np.concatenate((data_tr_list[i], data_te_list[i]), axis=0))
+    data_tensor_list = []
+    for i in range(len(data_mat_list)):
+        data_tensor_list.append(torch.FloatTensor(data_mat_list[i]))
         if cuda:
-            model_dict[module].cuda()    
-    return model_dict
+            data_tensor_list[i] = data_tensor_list[i].cuda()
+    idx_dict = {}
+    idx_dict["tr"] = list(range(num_tr))
+    idx_dict["te"] = list(range(num_tr, (num_tr+num_te)))
+    data_train_list = []
+    data_all_list = []
+    for i in range(len(data_tensor_list)):
+        data_train_list.append(data_tensor_list[i][idx_dict["tr"]].clone())
+        data_all_list.append(torch.cat((data_tensor_list[i][idx_dict["tr"]].clone(),
+                                       data_tensor_list[i][idx_dict["te"]].clone()),0))
+    labels = np.concatenate((labels_tr, labels_te))
+    
+    return data_train_list, data_all_list, idx_dict, labels
+
+
+def gen_trte_adj_mat(data_tr_list, data_trte_list, trte_idx, adj_parameter):
+    adj_metric = "cosine" # cosine distance
+    adj_train_list = []
+    adj_test_list = []
+    for i in range(len(data_tr_list)):
+        adj_parameter_adaptive = cal_adj_mat_parameter(adj_parameter, data_tr_list[i], adj_metric)
+        adj_train_list.append(gen_adj_mat_tensor(data_tr_list[i], adj_parameter_adaptive, adj_metric))
+        adj_test_list.append(gen_test_adj_mat_tensor(data_trte_list[i], trte_idx, adj_parameter_adaptive, adj_metric))
+    
+    return adj_train_list, adj_test_list
+
+
+def train_epoch(data_list, adj_list, label, one_hot_label, sample_weight, model_dict, optim_dict, train_VCDN=True):
+    loss_dict = {}
+    criterion = torch.nn.CrossEntropyLoss(reduction='none')
+    for m in model_dict:
+        model_dict[m].train()    
+    num_view = len(data_list)
+    for i in range(num_view):
+        optim_dict["C{:}".format(i+1)].zero_grad()
+        ci_loss = 0
+        ci = model_dict["C{:}".format(i+1)](model_dict["E{:}".format(i+1)](data_list[i],adj_list[i]))
+        ci_loss = torch.mean(torch.mul(criterion(ci, label),sample_weight))
+        ci_loss.backward()
+        optim_dict["C{:}".format(i+1)].step()
+        loss_dict["C{:}".format(i+1)] = ci_loss.detach().cpu().numpy().item()
+    if train_VCDN and num_view >= 2:
+        optim_dict["C"].zero_grad()
+        c_loss = 0
+        ci_list = []
+        for i in range(num_view):
+            ci_list.append(model_dict["C{:}".format(i+1)](model_dict["E{:}".format(i+1)](data_list[i],adj_list[i])))
+        c = model_dict["C"](ci_list)    
+        c_loss = torch.mean(torch.mul(criterion(c, label),sample_weight))
+        c_loss.backward()
+        optim_dict["C"].step()
+        loss_dict["C"] = c_loss.detach().cpu().numpy().item()
+    
+    return loss_dict
+    
+
+def test_epoch(data_list, adj_list, te_idx, model_dict):
+    for m in model_dict:
+        model_dict[m].eval()
+    num_view = len(data_list)
+    ci_list = []
+    for i in range(num_view):
+        ci_list.append(model_dict["C{:}".format(i+1)](model_dict["E{:}".format(i+1)](data_list[i],adj_list[i])))
+    if num_view >= 2:
+        c = model_dict["C"](ci_list)    
+    else:
+        c = ci_list[0]
+    c = c[te_idx,:]
+    prob = F.softmax(c, dim=1).data.cpu().numpy()
+    
+    return prob
+
+
+def train_test(data_folder, view_list, num_class,
+               lr_e_pretrain, lr_e, lr_c, 
+               num_epoch_pretrain, num_epoch):
+    test_inverval = 50
+    num_view = len(view_list)
+    dim_hvcdn = pow(num_class,num_view)
+    if data_folder == 'ROSMAP':
+        adj_parameter = 2
+        dim_he_list = [200,200,100]
+    if data_folder == 'BRCA':
+        adj_parameter = 10
+        dim_he_list = [400,400,200]
+    data_tr_list, data_trte_list, trte_idx, labels_trte = prepare_trte_data(data_folder, view_list)
+    labels_tr_tensor = torch.LongTensor(labels_trte[trte_idx["tr"]])
+    onehot_labels_tr_tensor = one_hot_tensor(labels_tr_tensor, num_class)
+    sample_weight_tr = cal_sample_weight(labels_trte[trte_idx["tr"]], num_class)
+    sample_weight_tr = torch.FloatTensor(sample_weight_tr)
+    if cuda:
+        labels_tr_tensor = labels_tr_tensor.cuda()
+        onehot_labels_tr_tensor = onehot_labels_tr_tensor.cuda()
+        sample_weight_tr = sample_weight_tr.cuda()
+    adj_tr_list, adj_te_list = gen_trte_adj_mat(data_tr_list, data_trte_list, trte_idx, adj_parameter)
+    dim_list = [x.shape[1] for x in data_tr_list]
+    model_dict = init_model_dict(num_view, num_class, dim_list, dim_he_list, dim_hvcdn)
+    for m in model_dict:
+        if cuda:
+            model_dict[m].cuda()
+    
+    print("\nPretrain GCNs...")
+    optim_dict = init_optim(num_view, model_dict, lr_e_pretrain, lr_c)
+    for epoch in range(num_epoch_pretrain):
+        train_epoch(data_tr_list, adj_tr_list, labels_tr_tensor, 
+                    onehot_labels_tr_tensor, sample_weight_tr, model_dict, optim_dict, train_VCDN=False)
+    print("\nTraining...")
+    optim_dict = init_optim(num_view, model_dict, lr_e, lr_c)
+    for epoch in range(num_epoch+1):
+        train_epoch(data_tr_list, adj_tr_list, labels_tr_tensor, 
+                    onehot_labels_tr_tensor, sample_weight_tr, model_dict, optim_dict)
+        if epoch % test_inverval == 0:
+            te_prob = test_epoch(data_trte_list, adj_te_list, trte_idx["te"], model_dict)
+            print("\nTest: Epoch {:d}".format(epoch))
+            if num_class == 2:
+                print("Test ACC: {:.3f}".format(accuracy_score(labels_trte[trte_idx["te"]], te_prob.argmax(1))))
+                print("Test F1: {:.3f}".format(f1_score(labels_trte[trte_idx["te"]], te_prob.argmax(1))))
+                print("Test AUC: {:.3f}".format(roc_auc_score(labels_trte[trte_idx["te"]], te_prob[:,1])))
+            else:
+                print("Test ACC: {:.3f}".format(accuracy_score(labels_trte[trte_idx["te"]], te_prob.argmax(1))))
+                print("Test F1 weighted: {:.3f}".format(f1_score(labels_trte[trte_idx["te"]], te_prob.argmax(1), average='weighted')))
+                print("Test F1 macro: {:.3f}".format(f1_score(labels_trte[trte_idx["te"]], te_prob.argmax(1), average='macro')))
+            print()
+
+
+
+# """ Training and testing of the model
+# """
+# import os
+# import numpy as np
+# from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+# import torch
+# import torch.nn.functional as F
+# from models import init_model_dict, init_optim
+# from utils import one_hot_tensor, cal_sample_weight, gen_adj_mat_tensor, gen_test_adj_mat_tensor, cal_adj_mat_parameter
+# from model_evaluation import plot_training_curves  # IMPORT NEW MODULE
+
+# cuda = True if torch.cuda.is_available() else False
+
+
+# def prepare_trte_data(data_folder, view_list):
+#     num_view = len(view_list)
+#     labels_tr = np.loadtxt(os.path.join(data_folder, "labels_tr.csv"), delimiter=',')
+#     labels_te = np.loadtxt(os.path.join(data_folder, "labels_te.csv"), delimiter=',')
+#     labels_tr = labels_tr.astype(int)
+#     labels_te = labels_te.astype(int)
+#     data_tr_list = []
+#     data_te_list = []
+#     for i in view_list:
+#         data_tr_list.append(np.loadtxt(os.path.join(data_folder, str(i)+"_tr.csv"), delimiter=','))
+#         data_te_list.append(np.loadtxt(os.path.join(data_folder, str(i)+"_te.csv"), delimiter=','))
+#     num_tr = data_tr_list[0].shape[0]
+#     num_te = data_te_list[0].shape[0]
+#     data_mat_list = []
+#     for i in range(num_view):
+#         data_mat_list.append(np.concatenate((data_tr_list[i], data_te_list[i]), axis=0))
+#     data_tensor_list = []
+#     for i in range(len(data_mat_list)):
+#         data_tensor_list.append(torch.FloatTensor(data_mat_list[i]))
+#         if cuda:
+#             data_tensor_list[i] = data_tensor_list[i].cuda()
+#     idx_dict = {}
+#     idx_dict["tr"] = list(range(num_tr))
+#     idx_dict["te"] = list(range(num_tr, (num_tr+num_te)))
+#     data_train_list = []
+#     data_all_list = []
+#     for i in range(len(data_tensor_list)):
+#         data_train_list.append(data_tensor_list[i][idx_dict["tr"]].clone())
+#         data_all_list.append(torch.cat((data_tensor_list[i][idx_dict["tr"]].clone(),
+#                                        data_tensor_list[i][idx_dict["te"]].clone()),0))
+#     labels = np.concatenate((labels_tr, labels_te))
+    
+#     return data_train_list, data_all_list, idx_dict, labels
+
+
+# def gen_trte_adj_mat(data_tr_list, data_trte_list, trte_idx, adj_parameter):
+#     adj_metric = "cosine" # cosine distance
+#     adj_train_list = []
+#     adj_test_list = []
+#     for i in range(len(data_tr_list)):
+#         adj_parameter_adaptive = cal_adj_mat_parameter(adj_parameter, data_tr_list[i], adj_metric)
+#         adj_train_list.append(gen_adj_mat_tensor(data_tr_list[i], adj_parameter_adaptive, adj_metric))
+#         adj_test_list.append(gen_test_adj_mat_tensor(data_trte_list[i], trte_idx, adj_parameter_adaptive, adj_metric))
+    
+#     return adj_train_list, adj_test_list
+
+
+# def train_epoch(data_list, adj_list, label, one_hot_label, sample_weight, model_dict, optim_dict, train_VCDN=True):
+#     loss_dict = {}
+#     criterion = torch.nn.CrossEntropyLoss(reduction='none')
+#     for m in model_dict:
+#         model_dict[m].train()    
+#     num_view = len(data_list)
+    
+#     # Train individual views
+#     for i in range(num_view):
+#         optim_dict["C{:}".format(i+1)].zero_grad()
+#         ci_loss = 0
+#         ci = model_dict["C{:}".format(i+1)](model_dict["E{:}".format(i+1)](data_list[i],adj_list[i]))
+#         ci_loss = torch.mean(torch.mul(criterion(ci, label),sample_weight))
+#         ci_loss.backward()
+#         optim_dict["C{:}".format(i+1)].step()
+#         loss_dict["C{:}".format(i+1)] = ci_loss.detach().cpu().numpy().item()
+    
+#     # Train VCDN (Fusion)
+#     final_pred = None
+#     total_loss = 0
+    
+#     if train_VCDN and num_view >= 2:
+#         optim_dict["C"].zero_grad()
+#         c_loss = 0
+#         ci_list = []
+#         for i in range(num_view):
+#             ci_list.append(model_dict["C{:}".format(i+1)](model_dict["E{:}".format(i+1)](data_list[i],adj_list[i])))
+#         c = model_dict["C"](ci_list)    
+#         c_loss = torch.mean(torch.mul(criterion(c, label),sample_weight))
+#         c_loss.backward()
+#         optim_dict["C"].step()
+#         loss_dict["C"] = c_loss.detach().cpu().numpy().item()
+        
+#         # Set for accuracy calc
+#         final_pred = c
+#         total_loss = c_loss.detach().cpu().item()
+#     else:
+#         # If pretraining, use the average of views for rough accuracy metric
+#         # (or just pick the first one, but avg is better proxy)
+#         # Note: This is just for logging, the model isn't trained on this average here
+#         with torch.no_grad():
+#             ci_list = []
+#             for i in range(num_view):
+#                 ci_list.append(model_dict["C{:}".format(i+1)](model_dict["E{:}".format(i+1)](data_list[i],adj_list[i])))
+#             # Simple average of logits for pretraining tracking
+#             final_pred = torch.stack(ci_list).mean(dim=0)
+#             total_loss = sum(loss_dict.values()) / len(loss_dict)
+
+#     # Calculate Train Accuracy
+#     pred_label = final_pred.argmax(1).cpu().numpy()
+#     true_label = label.cpu().numpy()
+#     train_acc = accuracy_score(true_label, pred_label)
+    
+#     return loss_dict, total_loss, train_acc
+    
+
+# def test_epoch(data_list, adj_list, te_idx, model_dict, labels_te=None):
+#     """
+#     Modified to return Loss and Accuracy in addition to Probabilities.
+#     labels_te: Tensor of true labels for the test set (needed for loss)
+#     """
+#     for m in model_dict:
+#         model_dict[m].eval()
+#     num_view = len(data_list)
+#     ci_list = []
+    
+#     # Forward pass
+#     with torch.no_grad(): # Ensure no gradients for testing
+#         for i in range(num_view):
+#             ci_list.append(model_dict["C{:}".format(i+1)](model_dict["E{:}".format(i+1)](data_list[i],adj_list[i])))
+        
+#         if num_view >= 2:
+#             c = model_dict["C"](ci_list)    
+#         else:
+#             c = ci_list[0]
+            
+#         c = c[te_idx,:]
+#         prob = F.softmax(c, dim=1)
+        
+#         # Calculate Loss and Acc if labels are provided
+#         test_loss = 0
+#         test_acc = 0
+#         if labels_te is not None:
+#             criterion = torch.nn.CrossEntropyLoss() # Standard reduction is mean
+#             test_loss = criterion(c, labels_te).item()
+#             test_acc = accuracy_score(labels_te.cpu().numpy(), prob.argmax(1).cpu().numpy())
+
+#     return prob.cpu().numpy(), test_loss, test_acc
+
+
+# def train_test(data_folder, view_list, num_class,
+#                lr_e_pretrain, lr_e, lr_c, 
+#                num_epoch_pretrain, num_epoch):
+    
+#     test_interval = 50
+#     num_view = len(view_list)
+#     dim_hvcdn = pow(num_class,num_view)
+    
+#     if data_folder == 'ROSMAP':
+#         adj_parameter = 2
+#         dim_he_list = [200,200,100]
+#     if data_folder == 'BRCA':
+#         adj_parameter = 10
+#         dim_he_list = [400,400,200]
+        
+#     data_tr_list, data_trte_list, trte_idx, labels_trte = prepare_trte_data(data_folder, view_list)
+#     labels_tr_tensor = torch.LongTensor(labels_trte[trte_idx["tr"]])
+#     labels_te_tensor = torch.LongTensor(labels_trte[trte_idx["te"]]) # Needed for test loss
+    
+#     onehot_labels_tr_tensor = one_hot_tensor(labels_tr_tensor, num_class)
+#     sample_weight_tr = cal_sample_weight(labels_trte[trte_idx["tr"]], num_class)
+#     sample_weight_tr = torch.FloatTensor(sample_weight_tr)
+    
+#     if cuda:
+#         labels_tr_tensor = labels_tr_tensor.cuda()
+#         labels_te_tensor = labels_te_tensor.cuda()
+#         onehot_labels_tr_tensor = onehot_labels_tr_tensor.cuda()
+#         sample_weight_tr = sample_weight_tr.cuda()
+        
+#     adj_tr_list, adj_te_list = gen_trte_adj_mat(data_tr_list, data_trte_list, trte_idx, adj_parameter)
+#     dim_list = [x.shape[1] for x in data_tr_list]
+#     model_dict = init_model_dict(num_view, num_class, dim_list, dim_he_list, dim_hvcdn)
+    
+#     for m in model_dict:
+#         if cuda:
+#             model_dict[m].cuda()
+    
+#     # --- History Tracking ---
+#     train_loss_hist = []
+#     train_acc_hist = []
+#     test_loss_hist = []
+#     test_acc_hist = []
+
+#     print("\nPretrain GCNs...")
+#     optim_dict = init_optim(num_view, model_dict, lr_e_pretrain, lr_c)
+#     for epoch in range(num_epoch_pretrain):
+#         # Note: Pretraining usually doesn't count towards the main evaluation curve 
+#         # because the VCDN isn't trained yet, but we can track it if you want.
+#         # Here I will NOT track pretrain in the main curve to avoid a sharp jump at epoch 500.
+#         train_epoch(data_tr_list, adj_tr_list, labels_tr_tensor, 
+#                     onehot_labels_tr_tensor, sample_weight_tr, model_dict, optim_dict, train_VCDN=False)
+    
+#     print("\nTraining...")
+#     optim_dict = init_optim(num_view, model_dict, lr_e, lr_c)
+    
+#     for epoch in range(num_epoch+1):
+#         # Train
+#         loss_dict, tr_loss, tr_acc = train_epoch(data_tr_list, adj_tr_list, labels_tr_tensor, 
+#                     onehot_labels_tr_tensor, sample_weight_tr, model_dict, optim_dict)
+        
+#         # Test (Running every epoch to generate smooth curve)
+#         te_prob, te_loss, te_acc = test_epoch(data_trte_list, adj_te_list, trte_idx["te"], model_dict, labels_te_tensor)
+        
+#         # Record
+#         train_loss_hist.append(tr_loss)
+#         train_acc_hist.append(tr_acc)
+#         test_loss_hist.append(te_loss)
+#         test_acc_hist.append(te_acc)
+
+#         # Print info periodically
+#         if epoch % test_interval == 0:
+#             print(f"\nTest: Epoch {epoch}")
+#             if num_class == 2:
+#                 print(f"Train Loss: {tr_loss:.3f} | Train Acc: {tr_acc:.3f}")
+#                 print(f"Test Loss:  {te_loss:.3f} | Test Acc:  {te_acc:.3f}")
+#                 print("Test F1: {:.3f}".format(f1_score(labels_trte[trte_idx["te"]], te_prob.argmax(1))))
+#                 print("Test AUC: {:.3f}".format(roc_auc_score(labels_trte[trte_idx["te"]], te_prob[:,1])))
+#             else:
+#                 print(f"Train Loss: {tr_loss:.3f} | Train Acc: {tr_acc:.3f}")
+#                 print(f"Test Loss:  {te_loss:.3f} | Test Acc:  {te_acc:.3f}")
+#                 print("Test F1 weighted: {:.3f}".format(f1_score(labels_trte[trte_idx["te"]], te_prob.argmax(1), average='weighted')))
+#                 print("Test F1 macro: {:.3f}".format(f1_score(labels_trte[trte_idx["te"]], te_prob.argmax(1), average='macro')))
+#             print()
+
+#     # --- Plot Curves ---
+#     print("Generating training curves...")
+#     plot_training_curves(train_loss_hist, test_loss_hist, train_acc_hist, test_acc_hist)
