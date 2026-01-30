@@ -19,3 +19,14 @@
 ├── BRCA/                  # Data directory (example dataset: Breast Cancer)
 ├── plots/                 # Output directory for generated training/testing curves
 └── README.md              # Project documentation
+
+# 🛠️ Getting Started
+## 1. Set Up Environment
+
+python -m venv venv
+
+# Windows
+.\venv\Scripts\activate
+
+# macOS/Linux
+source venv/bin/activate
