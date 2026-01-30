@@ -27,4 +27,4 @@ def convert_to_tiff(folder_path):
             print(f"❌ Failed to convert {filename}: {e}")
 
 # 📂 Replace with your folder path
-convert_to_tiff(r"D:\Masrafe\Masrafe extra\reasearch\mogonet\figure")
+convert_to_tiff(r"D:\Masrafe\Masrafe extra\reasearch\similarity\figure")
