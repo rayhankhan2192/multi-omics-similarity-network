@@ -91,3 +91,17 @@ Deep Learning,PyTorch
 Data Handling,"NumPy, Pandas"
 Metrics,Scikit-learn
 Visualization,Matplotlib
+
+## ✨ Example Configuration (main_mogonet.py)
+```bash
+data_folder = 'ROSMAP'
+view_list = [1, 2, 3]  # Three omics views
+num_epoch_pretrain = 500
+num_epoch = 2500
+
+# Start the training and testing pipeline
+train_test(data_folder, view_list, num_class, 
+           lr_e_pretrain, lr_e, lr_c, 
+           num_epoch_pretrain, num_epoch)
+           
+```
