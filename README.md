@@ -1,8 +1,8 @@
 # MOGONET: Multi-Omics Graph Convolutional Networks
 
-**Objective:** Develop a robust Multi-Omics Graph Convolutional Network (MOGONET) for biomedical classification tasks. The model integrates multi-omics data using Graph Convolutional Networks (GCN) for view-specific feature learning and a View Correlation Discovery Network (VCDN) for effective multi-omics data fusion.
+**Objective:** Develop and evaluate a robust Multi-Omics Graph Convolutional Network (MOGONET) for biomedical classification tasks, with a specific focus on analyzing the similarity network effect. The project aims to determine how different adjacency matrix construction methods specifically Hybrid Similarity (combining Cosine and RBF)—influence the feature extraction capabilities of Graph Convolutional Networks (GCN) and the subsequent multi-omics fusion via the View Correlation Discovery Network (VCDN).
 
-**Background:** Integrating diverse biological data types (e.g., mRNA, methylation, miRNA) is critical for accurate disease classification. MOGONET leverages the power of GCNs to capture relationships within each data "view" and uses a specialized tensor-product-based fusion layer (VCDN) to understand the correlations between different views, leading to better predictive performance than single-view analysis.
+**Background:** Integrating diverse biological data types (e.g., mRNA, methylation, miRNA) is critical for accurate disease classification. MOGONET leverages GCNs to capture intricate relationships within each data "view" and uses a specialized tensor-product-based fusion layer (VCDN) to understand cross-view correlations. A central challenge in this architecture is the initial graph construction; this project explores the similarity network effect by implementing an adaptive hybrid similarity metric to ensure the GCNs receive the most informative structural representations of the underlying biological samples.
 
 ---
 
@@ -103,5 +103,5 @@ num_epoch = 2500
 train_test(data_folder, view_list, num_class, 
            lr_e_pretrain, lr_e, lr_c, 
            num_epoch_pretrain, num_epoch)
-           
+
 ```
