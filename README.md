@@ -19,7 +19,7 @@
 ├── BRCA/                  # Data directory (example dataset: Breast Cancer)
 ├── plots/                 # Output directory for generated training/testing curves
 └── README.md              # Project documentation
-
+```
 # 🛠️ Getting Started
 ## 1. Set Up Environment
 
@@ -30,3 +30,15 @@ python -m venv venv
 
 # macOS/Linux
 source venv/bin/activate
+
+## 2. Install Dependencies
+
+pip install requirements.txt
+
+## 3. Prepare Data
+
+Ensure your data folders (e.g., ROSMAP) contain the following .csv files:
+
+labels_tr.csv / labels_te.csv: Training and testing labels.
+
+1_tr.csv, 2_tr.csv, etc.: Feature matrices for each omics view.
