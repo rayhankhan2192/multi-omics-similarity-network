@@ -25,20 +25,27 @@
 
 python -m venv venv
 
-# Windows
+### Windows
+```bash
 .\venv\Scripts\activate
-
-# macOS/Linux
+```
+### macOS/Linux
+```bash
 source venv/bin/activate
-
+```
 ## 2. Install Dependencies
-
+```bash
 pip install requirements.txt
-
+```
 ## 3. Prepare Data
 
 Ensure your data folders (e.g., ROSMAP) contain the following .csv files:
 
-labels_tr.csv / labels_te.csv: Training and testing labels.
+1. labels_tr.csv / labels_te.csv: Training and testing labels.
 
-1_tr.csv, 2_tr.csv, etc.: Feature matrices for each omics view.
+2. 1_tr.csv, 2_tr.csv, etc.: Feature matrices for each omics view.
+
+## 4. Run the Model
+```bash
+python main_mogonet.py
+```
